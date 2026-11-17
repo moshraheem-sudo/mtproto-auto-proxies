@@ -2,8 +2,13 @@
 """
 Automated MTProto Proxy Scraper
 Scrapes live Telegram MTProto proxies from the official web preview endpoint:
-https://t.me/s/ProxyMTProto (with '/s/' prefix for full web preview rendering)
-Features multi-page pagination, canonical deduplication, and automated updates.
+https://t.me/s/ProxyMTProto (with explicit '/s/' for complete web rendering)
+
+Supported extraction mechanisms:
+1. Structured message text extraction (Server: / Port: / Secret:)
+2. Inline 'Connect' buttons (<a href="tg://proxy?..." or "https://t.me/proxy?...">)
+3. Direct protocol links (tg://proxy and https://t.me/proxy)
+4. Multi-page traversal with ?before= pagination
 """
 
 import sys
@@ -22,12 +27,31 @@ except ImportError:
 BASE_CHANNEL_URL = "https://t.me/s/ProxyMTProto"
 OUTPUT_FILE = "proxies.txt"
 
-PROXY_REGEX = re.compile(
+# 1. Direct proxy link regex
+PROXY_LINK_REGEX = re.compile(
     r'(?:tg://proxy\?[^\s"\'<>]+|https?://t\.me/proxy\?[^\s"\'<>]+)',
     re.IGNORECASE
 )
 
+# 2. Structured text pattern for Telegram channels:
+# Server: ...
+# Port: ...
+# Secret: ...
+STRUCTURED_TEXT_REGEX = re.compile(
+    r'(?:Server|سرور):\s*([a-zA-Z0-9\.\-_]+)[\s\S]*?(?:Port|پورت):\s*(\d+)[\s\S]*?(?:Secret|سیکرت):\s*([a-zA-Z0-9_\-]+)',
+    re.IGNORECASE
+)
+
 BEFORE_PAGE_REGEX = re.compile(r'/s/ProxyMTProto\?before=(\d+)')
+
+def clean_host(host: str) -> str:
+    """Cleans domain or IP host string, stripping trailing dots and brackets."""
+    s = host.strip().rstrip('.')
+    if s.startswith("http://") or s.startswith("https://"):
+        s = urllib.parse.urlparse(s).netloc
+    if ':' in s and not s.startswith('['):
+        s = s.split(':')[0]
+    return s.strip().rstrip('.').lower()
 
 def parse_proxy_params(url: str):
     """Parses server, port, and secret to build a canonical deduplication key."""
@@ -35,17 +59,18 @@ def parse_proxy_params(url: str):
         clean_url = url.replace('&amp;', '&').strip()
         parsed = urllib.parse.urlparse(clean_url)
         qs = urllib.parse.parse_qs(parsed.query)
-        server = qs.get('server', [''])[0].strip().rstrip('.')
+        raw_server = qs.get('server', [''])[0].strip()
+        server = clean_host(raw_server)
         port = qs.get('port', [''])[0].strip()
         secret = qs.get('secret', [''])[0].strip()
         if server and port and secret:
-            return (server.lower(), port, secret)
+            return (server, port, secret)
     except Exception:
         pass
     return None
 
 def fetch_page(url: str, headers: dict) -> str:
-    """Fetches HTML from a single URL with timeout and fallback."""
+    """Fetches HTML with timeout and fallbacks."""
     if requests is not None:
         try:
             resp = requests.get(url, headers=headers, timeout=20)
@@ -54,7 +79,6 @@ def fetch_page(url: str, headers: dict) -> str:
         except Exception as e:
             print(f"requests notice for {url}: {e}")
 
-    # Fallback to urllib
     try:
         import urllib.request, ssl
         ctx = ssl.create_default_context()
@@ -68,7 +92,7 @@ def fetch_page(url: str, headers: dict) -> str:
 
     return ""
 
-def scrape_channel(channel_url=BASE_CHANNEL_URL, max_pages=3):
+def scrape_channel(channel_url=BASE_CHANNEL_URL, max_pages=4):
     """Scrapes proxies from the web channel, traversing up to max_pages using ?before= pagination."""
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -91,7 +115,20 @@ def scrape_channel(channel_url=BASE_CHANNEL_URL, max_pages=3):
 
         page_count = 0
 
-        # 1. Parse via BeautifulSoup anchor tags
+        # Method 1: Extract structured Server / Port / Secret from message text
+        for match in STRUCTURED_TEXT_REGEX.finditer(html):
+            raw_srv = match.group(1).strip()
+            srv = clean_host(raw_srv)
+            port = match.group(2).strip()
+            sec = match.group(3).strip()
+            key = (srv, port, sec)
+            if srv and port and sec and key not in seen_keys:
+                seen_keys.add(key)
+                constructed_url = f"tg://proxy?server={srv}&port={port}&secret={sec}"
+                proxies_found.append(constructed_url)
+                page_count += 1
+
+        # Method 2: Parse via BeautifulSoup anchor tags & inline buttons
         if BeautifulSoup is not None:
             try:
                 soup = BeautifulSoup(html, 'html.parser')
@@ -107,8 +144,8 @@ def scrape_channel(channel_url=BASE_CHANNEL_URL, max_pages=3):
             except Exception as e:
                 print(f"BeautifulSoup parsing error on page {page_num}: {e}")
 
-        # 2. Complement with Regex
-        matches = PROXY_REGEX.findall(html)
+        # Method 3: Regex match for direct proxy URLs in HTML
+        matches = PROXY_LINK_REGEX.findall(html)
         for m in matches:
             clean_url = m.strip().replace('&amp;', '&')
             key = parse_proxy_params(clean_url)
