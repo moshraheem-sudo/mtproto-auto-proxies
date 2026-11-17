@@ -92,8 +92,9 @@ def fetch_page(url: str, headers: dict) -> str:
 
     return ""
 
-def scrape_channel(channel_url=BASE_CHANNEL_URL, max_pages=4):
-    """Scrapes proxies from the web channel, traversing up to max_pages using ?before= pagination."""
+def scrape_channel(channel_url=BASE_CHANNEL_URL, min_proxies=50, max_pages=8):
+    """Scrapes proxies from the web channel, traversing up to max_pages using ?before= pagination
+    to ensure at least min_proxies (default 50) fresh unique proxies are extracted."""
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -104,7 +105,7 @@ def scrape_channel(channel_url=BASE_CHANNEL_URL, max_pages=4):
     seen_keys = set()
     current_url = channel_url
 
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Starting scrape from: {channel_url}")
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Starting scrape from: {channel_url} (Target: minimum {min_proxies} proxies)")
 
     for page_num in range(1, max_pages + 1):
         print(f"Fetching page {page_num}: {current_url}")
@@ -156,15 +157,21 @@ def scrape_channel(channel_url=BASE_CHANNEL_URL, max_pages=4):
 
         print(f"Page {page_num} yielded {page_count} new proxies. Total so far: {len(proxies_found)}")
 
+        # Check if we reached our target minimum of fresh proxies
+        if len(proxies_found) >= min_proxies:
+            print(f"Target of {min_proxies} proxies reached ({len(proxies_found)} found).")
+            break
+
         # Find pagination link for older messages: e.g. <a class="tme_messages_more" href="/s/ProxyMTProto?before=...">
         before_matches = BEFORE_PAGE_REGEX.findall(html)
         if before_matches:
             next_before = before_matches[0]
             current_url = f"{BASE_CHANNEL_URL}?before={next_before}"
         else:
+            print("No further pagination links found.")
             break
 
-    print(f"Scraping completed. Found {len(proxies_found)} unique proxies across pages.")
+    print(f"Scraping completed. Found {len(proxies_found)} unique fresh proxies across pages.")
     return proxies_found
 
 def main():
