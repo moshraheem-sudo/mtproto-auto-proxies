@@ -38,7 +38,7 @@ PROXY_LINK_REGEX = re.compile(
 # Port: ...
 # Secret: ...
 STRUCTURED_TEXT_REGEX = re.compile(
-    r'(?:Server|سرور):\s*([a-zA-Z0-9\.\-_]+)[\s\S]*?(?:Port|پورت):\s*(\d+)[\s\S]*?(?:Secret|سیکرت):\s*([a-zA-Z0-9_\-]+)',
+    r'(?:Server|سرور):\s*([a-zA-Z0-9\.\-_]+)[\s\S]*?(?:Port|پورت):\s*(\d+)[\s\S]*?(?:Secret|سیکرت):\s*([a-zA-Z0-9_\-+=/\s]+?)(?=(?:\r?\n\s*(?:@|Connect|دانلود|Download|http|$))|<)',
     re.IGNORECASE
 )
 
@@ -120,7 +120,7 @@ def scrape_channel(channel_url=BASE_CHANNEL_URL, max_pages=4):
             raw_srv = match.group(1).strip()
             srv = clean_host(raw_srv)
             port = match.group(2).strip()
-            sec = match.group(3).strip()
+            sec = re.sub(r'[\s\r\n\t]+', '', match.group(3).strip())
             key = (srv, port, sec)
             if srv and port and sec and key not in seen_keys:
                 seen_keys.add(key)
