@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
 Automated MTProto Proxy Scraper
-Scrapes live Telegram MTProto proxies from https://t.me/s/ProxyMTProto
-Deduplicates while preserving order and updates proxies.txt.
+Scrapes live Telegram MTProto proxies from the official web preview endpoint:
+https://t.me/s/ProxyMTProto (with '/s/' prefix for full web preview rendering)
+Features multi-page pagination, canonical deduplication, and automated updates.
 """
 
 import sys
@@ -18,7 +19,7 @@ except ImportError:
     requests = None
     BeautifulSoup = None
 
-TARGET_URL = "https://t.me/s/ProxyMTProto"
+BASE_CHANNEL_URL = "https://t.me/s/ProxyMTProto"
 OUTPUT_FILE = "proxies.txt"
 
 PROXY_REGEX = re.compile(
@@ -26,10 +27,13 @@ PROXY_REGEX = re.compile(
     re.IGNORECASE
 )
 
+BEFORE_PAGE_REGEX = re.compile(r'/s/ProxyMTProto\?before=(\d+)')
+
 def parse_proxy_params(url: str):
     """Parses server, port, and secret to build a canonical deduplication key."""
     try:
-        parsed = urllib.parse.urlparse(url)
+        clean_url = url.replace('&amp;', '&').strip()
+        parsed = urllib.parse.urlparse(clean_url)
         qs = urllib.parse.parse_qs(parsed.query)
         server = qs.get('server', [''])[0].strip().rstrip('.')
         port = qs.get('port', [''])[0].strip()
@@ -40,74 +44,96 @@ def parse_proxy_params(url: str):
         pass
     return None
 
-def fetch_proxies_from_telegram(channel_url=TARGET_URL):
-    """Fetches and extracts MTProto proxies from the Telegram web preview."""
+def fetch_page(url: str, headers: dict) -> str:
+    """Fetches HTML from a single URL with timeout and fallback."""
+    if requests is not None:
+        try:
+            resp = requests.get(url, headers=headers, timeout=20)
+            if resp.status_code == 200:
+                return resp.text
+        except Exception as e:
+            print(f"requests notice for {url}: {e}")
+
+    # Fallback to urllib
+    try:
+        import urllib.request, ssl
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=20, context=ctx) as r:
+            return r.read().decode('utf-8', errors='ignore')
+    except Exception as e:
+        print(f"urllib notice for {url}: {e}")
+
+    return ""
+
+def scrape_channel(channel_url=BASE_CHANNEL_URL, max_pages=3):
+    """Scrapes proxies from the web channel, traversing up to max_pages using ?before= pagination."""
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9',
     }
 
     proxies_found = []
     seen_keys = set()
+    current_url = channel_url
 
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Fetching from {channel_url}...")
-    html = ""
-    if requests is not None:
-        try:
-            response = requests.get(channel_url, headers=headers, timeout=25)
-            response.raise_for_status()
-            html = response.text
-        except Exception as e:
-            print(f"Notice: requests fetch to {channel_url} encountered: {e}")
-    
-    if not html:
-        try:
-            import urllib.request, ssl
-            ctx = ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-            req = urllib.request.Request(channel_url, headers=headers)
-            with urllib.request.urlopen(req, timeout=20, context=ctx) as resp:
-                html = resp.read().decode('utf-8', errors='ignore')
-        except Exception as e:
-            print(f"Notice: urllib fallback encountered: {e}")
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Starting scrape from: {channel_url}")
 
-    if not html:
-        print("Could not retrieve HTML from remote endpoint (possible local network block).")
-        return proxies_found
+    for page_num in range(1, max_pages + 1):
+        print(f"Fetching page {page_num}: {current_url}")
+        html = fetch_page(current_url, headers)
+        if not html:
+            print(f"No HTML returned for page {page_num}.")
+            break
 
-    # 1. Parse using BeautifulSoup for anchor tags if available
-    if BeautifulSoup is not None:
-        try:
-            soup = BeautifulSoup(html, 'html.parser')
-            for a in soup.find_all('a', href=True):
-                href = a['href'].strip()
-                if 'proxy?' in href and ('t.me/proxy' in href or 'tg://proxy' in href):
-                    clean_url = href.replace('&amp;', '&')
-                    key = parse_proxy_params(clean_url)
-                    if key and key not in seen_keys:
-                        seen_keys.add(key)
-                        proxies_found.append(clean_url)
-        except Exception as e:
-            print(f"BeautifulSoup parsing notice: {e}")
+        page_count = 0
 
-    # 2. Complement with Regex scan across entire raw HTML
-    matches = PROXY_REGEX.findall(html)
-    for m in matches:
-        clean_url = m.strip().replace('&amp;', '&')
-        key = parse_proxy_params(clean_url)
-        if key and key not in seen_keys:
-            seen_keys.add(key)
-            proxies_found.append(clean_url)
+        # 1. Parse via BeautifulSoup anchor tags
+        if BeautifulSoup is not None:
+            try:
+                soup = BeautifulSoup(html, 'html.parser')
+                for a in soup.find_all('a', href=True):
+                    href = a['href'].strip()
+                    if 'proxy?' in href and ('t.me/proxy' in href or 'tg://proxy' in href):
+                        clean_url = href.replace('&amp;', '&')
+                        key = parse_proxy_params(clean_url)
+                        if key and key not in seen_keys:
+                            seen_keys.add(key)
+                            proxies_found.append(clean_url)
+                            page_count += 1
+            except Exception as e:
+                print(f"BeautifulSoup parsing error on page {page_num}: {e}")
 
-    print(f"Scraped {len(proxies_found)} unique proxies from {channel_url}.")
+        # 2. Complement with Regex
+        matches = PROXY_REGEX.findall(html)
+        for m in matches:
+            clean_url = m.strip().replace('&amp;', '&')
+            key = parse_proxy_params(clean_url)
+            if key and key not in seen_keys:
+                seen_keys.add(key)
+                proxies_found.append(clean_url)
+                page_count += 1
+
+        print(f"Page {page_num} yielded {page_count} new proxies. Total so far: {len(proxies_found)}")
+
+        # Find pagination link for older messages: e.g. <a class="tme_messages_more" href="/s/ProxyMTProto?before=...">
+        before_matches = BEFORE_PAGE_REGEX.findall(html)
+        if before_matches:
+            next_before = before_matches[0]
+            current_url = f"{BASE_CHANNEL_URL}?before={next_before}"
+        else:
+            break
+
+    print(f"Scraping completed. Found {len(proxies_found)} unique proxies across pages.")
     return proxies_found
 
 def main():
-    new_proxies = fetch_proxies_from_telegram()
+    new_proxies = scrape_channel()
 
-    # Load existing proxies to preserve previous ones or merge
+    # Load existing proxies to merge
     existing = []
     if os.path.exists(OUTPUT_FILE):
         with open(OUTPUT_FILE, 'r', encoding='utf-8') as f:
@@ -116,14 +142,14 @@ def main():
     combined = []
     seen = set()
 
-    # Add newly scraped proxies first (freshness priority)
+    # New proxies first (freshest)
     for p in new_proxies:
         key = parse_proxy_params(p)
         if key and key not in seen:
             seen.add(key)
             combined.append(p)
 
-    # Retain previous proxies that are still unique
+    # Retain existing proxies that are unique
     for p in existing:
         key = parse_proxy_params(p)
         if key and key not in seen:
@@ -134,9 +160,9 @@ def main():
         with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
             for p in combined:
                 f.write(p + '\n')
-        print(f"Saved {len(combined)} deduplicated proxies to {OUTPUT_FILE}.")
+        print(f"Successfully saved {len(combined)} deduplicated proxies to {OUTPUT_FILE}.")
     else:
-        print("No proxies available to write.")
+        print("No proxies available to save.")
 
 if __name__ == '__main__':
     main()
